@@ -455,6 +455,27 @@ void App::OnInputAudio(const std::vector<uint8_t>& chunk) {
   if (!gate_ || gate_->step() != wakeup::Step::kActive) {
     return;
   }
+
+  // Local barge-in fallback. During long TTS playback the server often
+  // misses the interjection entirely (no ASRInfo / no asr final), so
+  // waiting for kAsrInfo is not enough. The board exposes a hardware
+  // playback reference on capture channel 3; a sustained high mic/ref
+  // ratio with low correlation is a reliable near-end speech cue.
+  if (player_ && player_->IsPlaying() && echo_stats.valid_ref) {
+    const bool strong_near_end =
+        (echo_stats.ratio > 1.5 && echo_stats.corr < 0.25);
+    if (strong_near_end) {
+      if (++near_end_frames_ >= 15) {  // ~300 ms of continuous speech
+        near_end_frames_ = 0;
+        OnUserActivity();
+      }
+    } else {
+      near_end_frames_ = 0;
+    }
+  } else {
+    near_end_frames_ = 0;
+  }
+
   if (client_) {
     bool ai_speaking = false;
     {
@@ -496,6 +517,9 @@ void App::OnAudio(const std::vector<uint8_t>& chunk) {
   if (!player_) {
     return;
   }
+  if (drop_tts_after_barge_in_.load()) {
+    return;  // residual frames of the interrupted turn
+  }
   {
     std::lock_guard<std::mutex> lock(mu_);
     ++pending_playback_chunks_;
@@ -536,6 +560,9 @@ void App::OnPlaybackChunkPlayed() {
 }
 
 void App::OnSetAiSpeaking(bool is_speaking) {
+  // Either a new TTS turn is starting, or the interrupted turn's
+  // kTtsEnded arrived. Both mean it is safe to play audio again.
+  drop_tts_after_barge_in_.store(false);
   {
     std::lock_guard<std::mutex> lock(mu_);
     is_ai_speaking_ = is_speaking;
@@ -567,11 +594,14 @@ void App::OnUserActivity() {
     gate_->RefreshTimeout();
   }
 
+  const bool playing_now = player_ ? player_->IsPlaying() : false;
   bool should_interrupt = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    should_interrupt = is_ai_speaking_ || pending_playback_chunks_ > 0;
+    should_interrupt = is_ai_speaking_ || pending_playback_chunks_ > 0 ||
+                       playing_now;
     if (should_interrupt) {
+      drop_tts_after_barge_in_.store(true);
       is_ai_speaking_ = false;
       // User barge-in cancels pending auto-close on prior farewell turn.
       ResetFarewellStateLocked();

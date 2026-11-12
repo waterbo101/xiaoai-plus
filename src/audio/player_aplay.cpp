@@ -195,6 +195,11 @@ void AplayPlayer::WriteLoop() {
   }
 }
 
+bool AplayPlayer::IsPlaying() {
+  std::lock_guard<std::mutex> lock(pipe_mu_);
+  return aplay_pid_ > 0;
+}
+
 void AplayPlayer::Close() {
   if (!running_.exchange(false)) {
     return;

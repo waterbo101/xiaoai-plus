@@ -24,6 +24,11 @@ class AplayPlayer {
   void Interrupt();
   void Close();
 
+  // True while the aplay child process still has audio to render.
+  // kTtsEnded only means the server finished streaming frames; the local
+  // pipe/ALSA buffer can keep playing for tens of seconds afterwards.
+  bool IsPlaying();
+
   void SetOnChunkPlayed(std::function<void(const std::vector<uint8_t>&)> cb);
 
  private:

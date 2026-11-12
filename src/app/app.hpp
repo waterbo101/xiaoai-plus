@@ -83,6 +83,14 @@ class App {
   bool farewell_tts_started_{false};
   size_t pending_playback_chunks_{0};
 
+  // Set on barge-in so the remaining TTS frames of that turn are dropped
+  // instead of re-forking aplay. Cleared when a new TTS turn starts (or
+  // when the interrupted turn's kTtsEnded finally arrives).
+  std::atomic<bool> drop_tts_after_barge_in_{false};
+  // Consecutive capture frames with strong near-end speech while playing;
+  // used by the local barge-in fallback (capture thread only).
+  int near_end_frames_{0};
+
   // Reused capture-thread buffers to reduce per-frame allocations.
   std::vector<uint8_t> s16_buf_;
   std::vector<uint8_t> capture_mono_buf_;
