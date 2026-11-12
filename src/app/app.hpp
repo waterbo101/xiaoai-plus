@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -83,13 +84,20 @@ class App {
   bool farewell_tts_started_{false};
   size_t pending_playback_chunks_{0};
 
-  // Set on barge-in so the remaining TTS frames of that turn are dropped
-  // instead of re-forking aplay. Cleared when a new TTS turn starts (or
-  // when the interrupted turn's kTtsEnded finally arrives).
-  std::atomic<bool> drop_tts_after_barge_in_{false};
-  // Consecutive capture frames with strong near-end speech while playing;
-  // used by the local barge-in fallback (capture thread only).
-  int near_end_frames_{0};
+  // Monotonic-clock deadline (ms) up to which the local aplay buffer is
+  // still rendering audio. Accumulated from the PCM bytes actually received,
+  // so it covers the long local tail after the server's kTtsEnded.
+  std::atomic<int64_t> play_until_ms_{0};
+  // Deadline (ms) until which residual TTS frames are dropped after a
+  // barge-in. Auto-expires so the speaker can never stay permanently mute.
+  std::atomic<int64_t> drop_until_ms_{0};
+
+  // Capture-thread-only state for the local near-end speech detector.
+  int near_end_hits_{0};
+  int64_t last_barge_ms_{0};
+  int64_t diag_next_ms_{0};
+
+  bool IsTtsAudible() const;
 
   // Reused capture-thread buffers to reduce per-frame allocations.
   std::vector<uint8_t> s16_buf_;

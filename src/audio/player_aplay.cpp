@@ -1,6 +1,11 @@
 #include "audio/player.hpp"
 
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <dirent.h>
+#include <fstream>
+#include <iterator>
 #include <signal.h>
 #include <sstream>
 #include <string>
@@ -15,6 +20,62 @@ namespace xiaoai_plus::audio {
 
 namespace {
 const auto kLog = xiaoai_plus::GetLogger("player");
+
+// ClosePipeLocked(false) clears aplay_pid_ 1.2s after the queue drains, but
+// aplay keeps rendering its ALSA buffer for many seconds. From that moment
+// the recorded pid is gone and Interrupt() can no longer stop the sound.
+// Scan /proc for any aplay still bound to our output device and kill it.
+// Killing it also releases the waitpid() that ClosePipeLocked() may be stuck
+// in while holding pipe_mu_, so Interrupt() can then take the lock.
+void KillStrayAplay(const std::string& device) {
+  DIR* dir = opendir("/proc");
+  if (!dir) {
+    return;
+  }
+  const pid_t self = getpid();
+  struct dirent* ent = nullptr;
+  while ((ent = readdir(dir)) != nullptr) {
+    const char* name = ent->d_name;
+    if (name[0] < '0' || name[0] > '9') {
+      continue;
+    }
+    char path[128];
+    std::snprintf(path, sizeof(path), "/proc/%s/cmdline", name);
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+      continue;
+    }
+    const std::string cmd((std::istreambuf_iterator<char>(f)),
+                          std::istreambuf_iterator<char>());
+    bool is_aplay = false;
+    bool uses_device = false;
+    size_t start = 0;
+    for (size_t i = 0; i <= cmd.size(); ++i) {
+      if (i != cmd.size() && cmd[i] != '\0') {
+        continue;
+      }
+      if (i > start) {
+        const std::string arg = cmd.substr(start, i - start);
+        if (arg == "aplay" ||
+            (arg.size() >= 6 && arg.compare(arg.size() - 6, 6, "/aplay") == 0)) {
+          is_aplay = true;
+        }
+        if (arg == device) {
+          uses_device = true;
+        }
+      }
+      start = i + 1;
+    }
+    if (is_aplay && uses_device) {
+      const pid_t pid = static_cast<pid_t>(std::atoi(name));
+      if (pid > 0 && pid != self) {
+        kill(pid, SIGKILL);
+        kLog->info("interrupt: killed stray aplay pid={}", static_cast<int>(pid));
+      }
+    }
+  }
+  closedir(dir);
+}
 }  // namespace
 
 AplayPlayer::AplayPlayer(config::Audio cfg, int queue_frames)
@@ -53,6 +114,9 @@ bool AplayPlayer::Play(const std::vector<uint8_t>& chunk) {
 }
 
 void AplayPlayer::Interrupt() {
+  // Must run before taking pipe_mu_: a stray aplay may currently be keeping
+  // ClosePipeLocked()'s blocking waitpid() (and the lock) alive.
+  KillStrayAplay(cfg_.output_device);
   {
     std::lock_guard<std::mutex> lock(mu_);
     queue_.clear();

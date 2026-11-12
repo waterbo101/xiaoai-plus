@@ -20,6 +20,12 @@ namespace {
 
 const auto kLog = xiaoai_plus::GetLogger("app");
 
+int64_t NowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
 constexpr int kWakeupTimeoutSec = 60;
 constexpr int kWelcomeResponseTimeoutSec = 8;
 constexpr float kKwsThreshold = 0.20f;
@@ -456,24 +462,33 @@ void App::OnInputAudio(const std::vector<uint8_t>& chunk) {
     return;
   }
 
-  // Local barge-in fallback. During long TTS playback the server often
-  // misses the interjection entirely (no ASRInfo / no asr final), so
-  // waiting for kAsrInfo is not enough. The board exposes a hardware
-  // playback reference on capture channel 3; a sustained high mic/ref
-  // ratio with low correlation is a reliable near-end speech cue.
-  if (player_ && player_->IsPlaying() && echo_stats.valid_ref) {
-    const bool strong_near_end =
-        (echo_stats.ratio > 1.5 && echo_stats.corr < 0.25);
-    if (strong_near_end) {
-      if (++near_end_frames_ >= 15) {  // ~300 ms of continuous speech
-        near_end_frames_ = 0;
-        OnUserActivity();
-      }
-    } else {
-      near_end_frames_ = 0;
+  // Local barge-in fallback. kAsrInfo only arrives when the server hears
+  // the interjection; during long local playback the server is often deaf
+  // to it. Use the hardware playback reference (capture channel 3) and the
+  // app-level playback deadline to detect near-end speech ourselves.
+  const int64_t now_ms = NowMs();
+  if (IsTtsAudible() && echo_stats.valid_ref) {
+    const bool near_end = (echo_stats.ratio > 0.85 || echo_stats.corr < 0.12) &&
+                          echo_stats.mic_rms > 200.0;
+    if (near_end) {
+      ++near_end_hits_;
+    } else if (near_end_hits_ > 0) {
+      --near_end_hits_;
+    }
+    if (near_end_hits_ >= 8 && now_ms - last_barge_ms_ > 1200) {
+      near_end_hits_ = 0;
+      last_barge_ms_ = now_ms;
+      kLog->info("local barge-in: near-end speech during playback");
+      OnUserActivity();
+    }
+    if (now_ms >= diag_next_ms_) {
+      diag_next_ms_ = now_ms + 500;
+      kLog->info("vis-diag rem={}ms ratio={:.2f} corr={:.3f} mic={:.0f} ref={:.0f} hits={}",
+                 play_until_ms_.load() - now_ms, echo_stats.ratio, echo_stats.corr,
+                 echo_stats.mic_rms, echo_stats.ref_rms, near_end_hits_);
     }
   } else {
-    near_end_frames_ = 0;
+    near_end_hits_ = 0;
   }
 
   if (client_) {
@@ -517,9 +532,22 @@ void App::OnAudio(const std::vector<uint8_t>& chunk) {
   if (!player_) {
     return;
   }
-  if (drop_tts_after_barge_in_.load()) {
-    return;  // residual frames of the interrupted turn
+  const int64_t now_ms = NowMs();
+  if (drop_until_ms_.load() > now_ms) {
+    return;  // residual frames of the interrupted turn (auto-expires)
   }
+
+  const int bytes_per_sec =
+      cfg_.audio.sample_rate * cfg_.audio.channels * (cfg_.audio.bits_per_sample / 8);
+  if (bytes_per_sec > 0) {
+    const int64_t dur_ms = static_cast<int64_t>(chunk.size()) * 1000 / bytes_per_sec;
+    int64_t base = play_until_ms_.load();
+    if (base < now_ms) {
+      base = now_ms;
+    }
+    play_until_ms_.store(base + dur_ms);
+  }
+
   {
     std::lock_guard<std::mutex> lock(mu_);
     ++pending_playback_chunks_;
@@ -549,6 +577,10 @@ void App::OnAudio(const std::vector<uint8_t>& chunk) {
   }
 }
 
+bool App::IsTtsAudible() const {
+  return play_until_ms_.load() > NowMs();
+}
+
 void App::OnPlaybackChunkPlayed() {
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -560,9 +592,12 @@ void App::OnPlaybackChunkPlayed() {
 }
 
 void App::OnSetAiSpeaking(bool is_speaking) {
-  // Either a new TTS turn is starting, or the interrupted turn's
-  // kTtsEnded arrived. Both mean it is safe to play audio again.
-  drop_tts_after_barge_in_.store(false);
+  // Only a NEW speaking turn re-arms playback. kTtsEnded(false) must not
+  // clear the drop window, otherwise residual frames of the interrupted
+  // turn would be played right after Interrupt().
+  if (is_speaking) {
+    drop_until_ms_.store(0);
+  }
   {
     std::lock_guard<std::mutex> lock(mu_);
     is_ai_speaking_ = is_speaking;
@@ -594,14 +629,15 @@ void App::OnUserActivity() {
     gate_->RefreshTimeout();
   }
 
-  const bool playing_now = player_ ? player_->IsPlaying() : false;
+  const bool playing_now = IsTtsAudible() || (player_ ? player_->IsPlaying() : false);
   bool should_interrupt = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     should_interrupt = is_ai_speaking_ || pending_playback_chunks_ > 0 ||
                        playing_now;
     if (should_interrupt) {
-      drop_tts_after_barge_in_.store(true);
+      drop_until_ms_.store(NowMs() + 2500);
+      play_until_ms_.store(0);
       is_ai_speaking_ = false;
       // User barge-in cancels pending auto-close on prior farewell turn.
       ResetFarewellStateLocked();
@@ -769,6 +805,7 @@ void App::BeginFarewellStateLocked() {
 }
 
 void App::InterruptPlayback() {
+  play_until_ms_.store(0);
   {
     std::lock_guard<std::mutex> lock(mu_);
     pending_playback_chunks_ = 0;
