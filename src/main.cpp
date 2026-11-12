@@ -36,6 +36,10 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT, SignalHandler);
     std::signal(SIGTERM, SignalHandler);
+    // An aplay child can be killed while we are writing to its pipe.
+    // Without this, write() raises SIGPIPE and takes down the whole
+    // speaker process instead of just the playback.
+    std::signal(SIGPIPE, SIG_IGN);
 
     std::thread signal_watcher([&app, &watcher_done]() {
       while (!watcher_done.load()) {

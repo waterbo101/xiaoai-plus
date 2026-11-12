@@ -21,12 +21,14 @@ namespace xiaoai_plus::audio {
 namespace {
 const auto kLog = xiaoai_plus::GetLogger("player");
 
-// ClosePipeLocked(false) clears aplay_pid_ 1.2s after the queue drains, but
-// aplay keeps rendering its ALSA buffer for many seconds. From that moment
-// the recorded pid is gone and Interrupt() can no longer stop the sound.
-// Scan /proc for any aplay still bound to our output device and kill it.
-// Killing it also releases the waitpid() that ClosePipeLocked() may be stuck
-// in while holding pipe_mu_, so Interrupt() can then take the lock.
+// ClosePipeLocked(false) retires aplay_pid_ 1.2s after the queue drains, but
+// aplay keeps rendering its ALSA buffer for several more seconds. From that
+// moment Interrupt() no longer knows the pid and cannot silence the tail.
+// Find any aplay still bound to our output device and stop it.
+//
+// IMPORTANT: callers MUST already hold pipe_mu_. WriteLoop takes the same
+// lock around write(); killing outside that lock races with write() and
+// raises SIGPIPE in the parent (this is what broke v2).
 void KillStrayAplay(const std::string& device) {
   DIR* dir = opendir("/proc");
   if (!dir) {
@@ -114,14 +116,14 @@ bool AplayPlayer::Play(const std::vector<uint8_t>& chunk) {
 }
 
 void AplayPlayer::Interrupt() {
-  // Must run before taking pipe_mu_: a stray aplay may currently be keeping
-  // ClosePipeLocked()'s blocking waitpid() (and the lock) alive.
-  KillStrayAplay(cfg_.output_device);
   {
     std::lock_guard<std::mutex> lock(mu_);
     queue_.clear();
   }
+  // Take pipe_mu_ FIRST: WriteLoop holds it across write(). Killing
+  // aplay while it writes would raise SIGPIPE in this process.
   std::lock_guard<std::mutex> pipe_lock(pipe_mu_);
+  KillStrayAplay(cfg_.output_device);
   ClosePipeLocked(true);
 }
 
@@ -257,11 +259,6 @@ void AplayPlayer::WriteLoop() {
       cb(chunk);
     }
   }
-}
-
-bool AplayPlayer::IsPlaying() {
-  std::lock_guard<std::mutex> lock(pipe_mu_);
-  return aplay_pid_ > 0;
 }
 
 void AplayPlayer::Close() {

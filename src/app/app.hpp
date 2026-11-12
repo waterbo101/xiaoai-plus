@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <condition_variable>
-#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -83,21 +82,6 @@ class App {
   bool farewell_chat_ended_{false};
   bool farewell_tts_started_{false};
   size_t pending_playback_chunks_{0};
-
-  // Monotonic-clock deadline (ms) up to which the local aplay buffer is
-  // still rendering audio. Accumulated from the PCM bytes actually received,
-  // so it covers the long local tail after the server's kTtsEnded.
-  std::atomic<int64_t> play_until_ms_{0};
-  // Deadline (ms) until which residual TTS frames are dropped after a
-  // barge-in. Auto-expires so the speaker can never stay permanently mute.
-  std::atomic<int64_t> drop_until_ms_{0};
-
-  // Capture-thread-only state for the local near-end speech detector.
-  int near_end_hits_{0};
-  int64_t last_barge_ms_{0};
-  int64_t diag_next_ms_{0};
-
-  bool IsTtsAudible() const;
 
   // Reused capture-thread buffers to reduce per-frame allocations.
   std::vector<uint8_t> s16_buf_;

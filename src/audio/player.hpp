@@ -24,11 +24,6 @@ class AplayPlayer {
   void Interrupt();
   void Close();
 
-  // True while the aplay child process is still tracked. This becomes false
-  // while aplay drains its ALSA buffer, so App::IsTtsAudible() is the
-  // authoritative playback state for barge-in decisions.
-  bool IsPlaying();
-
   void SetOnChunkPlayed(std::function<void(const std::vector<uint8_t>&)> cb);
 
  private:
