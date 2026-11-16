@@ -41,6 +41,7 @@ class Client {
   bool EnqueueAudio(const std::vector<uint8_t>& chunk);
   bool EnqueueAudio(std::vector<uint8_t>&& chunk);
   bool SendSayHello();
+  void ResetConnection();
 
  private:
   bool EnsureConnection(std::chrono::milliseconds timeout);
@@ -70,6 +71,7 @@ class Client {
   std::condition_variable conn_cv_;
   std::unique_ptr<ix::WebSocket> ws_;
   bool ws_connected_{false};
+  std::chrono::steady_clock::time_point conn_opened_at_{};
   std::string session_id_;
 
   mutable std::mutex write_mu_;

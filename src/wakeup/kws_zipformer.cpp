@@ -10,7 +10,11 @@ namespace xiaoai_plus::wakeup {
 
 namespace {
 
-constexpr float kKwsThreshold = 0.20f;
+// 0.09 / 4.0 were measured offline against real room recordings:
+// normal-volume hits score 0.09~0.20, so the stock 0.20 threshold
+// dropped most of them. Keep these as source constants so a rebuild
+// cannot silently restore the factory sensitivity.
+constexpr float kKwsThreshold = 0.09f;
 
 const auto kLog = xiaoai_plus::GetLogger("kws");
 
@@ -32,7 +36,7 @@ struct ZipformerKwsEngine::Impl {
           c.model_config.num_threads = 2;
           c.model_config.provider = "cpu";
           c.keywords_threshold = kKwsThreshold;
-          c.keywords_score = 3.0f;
+          c.keywords_score = 4.0f;
           c.num_trailing_blanks = 0;
           c.max_active_paths = 8;
           c.keywords_file = cfg.keywords_file;

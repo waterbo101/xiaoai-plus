@@ -319,9 +319,11 @@ void App::ConvertS32ToS16(const std::vector<uint8_t>& chunk, std::vector<uint8_t
   out->resize(n * sizeof(int16_t));
   auto* dst = reinterpret_cast<int16_t*>(out->data());
   for (size_t i = 0; i < n; ++i) {
-    // A113 PDM outputs 24-bit data in the lower 24 bits of S32_LE.
-    // Shift right by 8 to map correctly to S16 range.
-    int32_t s = in[i] >> 8;
+    // A113 PDM emits 24-bit left-aligned samples in S32_LE: the low
+    // 8 bits are always zero. Shifting by 8 over-amplifies by 256x
+    // and hard-clips speech, which wrecks both KWS and uplink ASR.
+    // Shift 12 was measured to give clean, unclipped levels.
+    int32_t s = in[i] >> 12;
     if (s > 32767) s = 32767;
     if (s < -32768) s = -32768;
     dst[i] = static_cast<int16_t>(s);
@@ -631,9 +633,17 @@ void App::OnArm(const std::string& reason) {
     return;
   }
   if (!client_->StartSession(std::chrono::seconds(12))) {
-    kLog->error("start session failed");
-    gate_->Disarm("session_start_failed");
-    return;
+    // A long-idle socket can be silently recycled by the server.
+    // The failed attempt already tore it down; force a clean state
+    // and give the fresh connection one more try before disarming,
+    // so the user does not have to say the wake word twice.
+    kLog->warn("start session failed, resetting connection and retrying once");
+    client_->ResetConnection();
+    if (!client_->StartSession(std::chrono::seconds(12))) {
+      kLog->error("start session failed");
+      gate_->Disarm("session_start_failed");
+      return;
+    }
   }
   if (!client_->SendSayHello()) {
     kLog->error("send say_hello failed");

@@ -14,6 +14,14 @@ namespace {
 
 const auto kLog = xiaoai_plus::GetLogger("realtime");
 
+// The server recycles idle realtime sockets roughly every 15 minutes.
+// IXWebSocket reconnects transparently, but a reconnect only fires
+// onOpen (ws_connected_ = true) and never replays the application
+// level StartConnection handshake. Such a socket looks alive to us
+// yet the server will not answer StartSession on it. Force a full
+// rebuild once a handshaken connection is older than this.
+const auto kMaxConnectionAge = std::chrono::minutes(10);
+
 std::string GenSessionId() {
   const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
   return "sid-" + std::to_string(now);
@@ -265,7 +273,8 @@ bool Client::EnsureConnection(std::chrono::milliseconds timeout) {
   while (running_.load()) {
     {
       std::lock_guard<std::mutex> lock(conn_mu_);
-      if (ws_ && ws_connected_) {
+      if (ws_ && ws_connected_ &&
+          std::chrono::steady_clock::now() - conn_opened_at_ < kMaxConnectionAge) {
         return true;
       }
     }
@@ -442,8 +451,15 @@ bool Client::OpenConnection(std::chrono::milliseconds timeout) {
   {
     std::lock_guard<std::mutex> lock(conn_mu_);
     ws_connected_ = true;
+    conn_opened_at_ = std::chrono::steady_clock::now();
   }
   return true;
+}
+
+void Client::ResetConnection() {
+  // Drop the socket without a finish event; the next StartSession()
+  // will run the full StartConnection handshake again.
+  CloseConnection(false);
 }
 
 void Client::CloseConnection(bool send_finish_event) {
