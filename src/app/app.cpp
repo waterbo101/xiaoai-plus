@@ -25,6 +25,32 @@ constexpr int kWelcomeResponseTimeoutSec = 8;
 constexpr float kKwsThreshold = 0.20f;
 constexpr int kMinTriggerIntervalMs = 800;
 
+// Exit commands matched against the final ASR transcript. "关闭" is also a
+// frequent smart-home verb, so ignore it when a controllable object appears
+// in the same utterance (e.g. "关闭客厅灯" must not end the conversation).
+bool IsExitCommand(const std::string& text) {
+  static const char* const kExitWords[] = {"再见", "退下", "退出", "关闭"};
+  static const char* const kControlObjects[] = {
+      "灯", "空调", "窗帘", "电视", "音乐", "歌", "音量", "风扇",
+      "插座", "净化", "扫地", "播放", "闹钟", "提醒"};
+  for (const char* word : kExitWords) {
+    if (text.find(word) == std::string::npos) continue;
+    if (std::string(word) == "关闭") {
+      bool has_object = false;
+      for (const char* obj : kControlObjects) {
+        if (text.find(obj) != std::string::npos) {
+          has_object = true;
+          break;
+        }
+      }
+      if (has_object) continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+
 struct EchoStats {
   double mic_rms{0.0};
   double ref_rms{0.0};
@@ -188,6 +214,8 @@ App::App(config::Config cfg) : cfg_(std::move(cfg)) {
   auto wakeup_keywords = LoadWakeupKeywords(cfg_.wakeup.keywords_file);
   kLog->info("loaded {} wakeup keyword labels from '{}'", wakeup_keywords.size(),
              cfg_.wakeup.keywords_file);
+
+  kLog->info("exitwords v5: 4 commands enabled");
   trigger_ = std::make_unique<wakeup::Trigger>(
       std::move(wakeup_keywords),
       [this](const std::string& keyword) {
@@ -557,7 +585,7 @@ void App::OnAsrFinal(const std::string& text) {
   if (gate_ && gate_->step() == wakeup::Step::kActive) {
     gate_->RefreshTimeout();
   }
-  if (text.find("再见") != std::string::npos) {
+  if (IsExitCommand(text)) {
     std::lock_guard<std::mutex> lock(mu_);
     BeginFarewellStateLocked();
   }
